@@ -10,6 +10,7 @@
 #   --target-dir PATH     Where to create year folders (default: source dir)
 #   --dry-run             Show what would be done without making changes
 #   --exclude DIR         Exclude directory from processing (can be used multiple times)
+#   --include DIR         Include directory for processing (can be used multiple times)
 #   --choose-excludes     Interactively select subdirectories to exclude
 #   --choose-includes     Interactively select ONLY subdirectories to process
 #   --interactive         Prompt for each file move (default for duplicates only)
@@ -57,6 +58,7 @@ Options:
     --target-dir PATH    Where to create year folders (default: source directory)
     --dry-run            Show what would be done without making changes
     --exclude DIR        Exclude directory (can be used multiple times)
+    --include DIR        Include directory (can be used multiple times, overrides excludes)
     --choose-excludes    Interactively select subdirectories to exclude before processing
     --choose-includes    Interactively select ONLY subdirectories to process (overrides excludes)
     --interactive        Prompt for confirmation before each move
@@ -100,6 +102,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --exclude)
             EXCLUDED_DIRS+=("$2")
+            shift 2
+            ;;
+        --include)
+            INCLUDED_DIRS+=("$2")
             shift 2
             ;;
         --choose-excludes)
