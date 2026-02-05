@@ -36,7 +36,7 @@ class ScriptRunner(QThread):
         try:
             # Use Git Bash on Windows
             if sys.platform == "win32":
-                cmd = ["bash", str(self.script_path)] + self.args
+                cmd = [self.args[0], str(self.script_path)] + self.args[1:]
             else:
                 cmd = [str(self.script_path)] + self.args
 
@@ -78,6 +78,7 @@ class OrgDocsGUI(QMainWindow):
         self.runner_thread = None
         self.source_dir = str(Path.home())
         self.splitter = None  # Will be set in init_ui
+        self.bash_path_edit = None  # Windows-specific bash path
 
         self.init_ui()
         self.load_settings()
@@ -163,6 +164,23 @@ class OrgDocsGUI(QMainWindow):
         options_group.setLayout(options_layout)
         top_layout.addWidget(options_group)
 
+        # Windows-specific: Git Bash path configuration
+        if sys.platform == "win32":
+            bash_group = QGroupBox("Bash Configuration (Windows)")
+            bash_layout = QHBoxLayout()
+
+            bash_layout.addWidget(QLabel("Bash Path:"))
+            self.bash_path_edit = QLineEdit("C:/Program Files/Git/bin/bash.exe")
+            self.bash_path_edit.setPlaceholderText("Path to bash.exe (Git Bash)")
+            bash_layout.addWidget(self.bash_path_edit)
+
+            bash_browse_btn = QPushButton("Browse...")
+            bash_browse_btn.clicked.connect(self.browse_bash)
+            bash_layout.addWidget(bash_browse_btn)
+
+            bash_group.setLayout(bash_layout)
+            top_layout.addWidget(bash_group)
+
         self.splitter.addWidget(top_widget)
 
         # Bottom section (log output)
@@ -227,6 +245,18 @@ class OrgDocsGUI(QMainWindow):
         )
         if dir_path:
             self.target_edit.setText(dir_path)
+            self.save_settings()
+
+    def browse_bash(self):
+        """Browse for bash executable (Windows only)"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Bash Executable",
+            "C:/Program Files/Git/bin",
+            "Executable Files (*.exe);;All Files (*.*)"
+        )
+        if file_path:
+            self.bash_path_edit.setText(file_path)
             self.save_settings()
 
     def refresh_tree(self):
@@ -345,6 +375,25 @@ class OrgDocsGUI(QMainWindow):
             )
             return
 
+        # Windows: Check bash path
+        bash_exe = None
+        if sys.platform == "win32":
+            if self.bash_path_edit:
+                bash_exe = self.bash_path_edit.text()
+                if bash_exe and not Path(bash_exe).exists():
+                    reply = QMessageBox.warning(
+                        self,
+                        "Bash Not Found",
+                        f"Bash executable not found at:\n{bash_exe}\n\nContinue with default 'bash' command (may use WSL)?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No
+                    )
+                    if reply == QMessageBox.No:
+                        return
+                    bash_exe = "bash"  # Fallback to default
+            else:
+                bash_exe = "bash"
+
         selected_folders = self.get_selected_folders()
         if not selected_folders:
             reply = QMessageBox.question(
@@ -359,9 +408,14 @@ class OrgDocsGUI(QMainWindow):
 
         args = self.build_command_args()
 
+        # Prepend bash executable for Windows
+        if sys.platform == "win32" and bash_exe:
+            args = [bash_exe] + args
+
         self.log_output.clear()
-        self.log_output.append(f"<span style='color: #61afef;'>Running: bash {self.script_path.name} {' '.join(args)}</span>")
-        self.log_output.append("<span style='color: #61afef;'>{'─' * 80}</span>")
+        display_cmd = f"bash {self.script_path.name} {' '.join(args[1:] if sys.platform == 'win32' else args)}"
+        self.log_output.append(f"<span style='color: #61afef;'>Running: {display_cmd}</span>")
+        self.log_output.append("<span style='color: #61afef;'>" + "─" * 80 + "</span>")
 
         # Disable run button, enable stop button
         self.run_btn.setEnabled(False)
@@ -446,10 +500,10 @@ class OrgDocsGUI(QMainWindow):
             if 'splitter_sizes' in settings and self.splitter:
                 self.splitter.setSizes(settings['splitter_sizes'])
 
-            self.log_output.append("<span style='color: #4CAF50;'>✓ Settings loaded</span>")
+            # Restore bash path (Windows only)
+            if sys.platform == "win32" and 'bash_path' in settings and self.bash_path_edit:
+                self.bash_path_edit.setText(settings['bash_path'])
 
-        except Exception as e:
-            self.log_output.append(f"<span style='color: #ff9800;'>Warning: Could not load settings: {str(e)}</span>")
 
     def save_settings(self):
         """Save settings to JSON file"""
@@ -463,17 +517,9 @@ class OrgDocsGUI(QMainWindow):
                 'splitter_sizes': self.splitter.sizes() if self.splitter else [420, 280]
             }
 
-            with open(self.SETTINGS_FILE, 'w') as f:
-                json.dump(settings, f, indent=2)
-
-        except Exception as e:
-            print(f"Warning: Could not save settings: {str(e)}")
-
-    def closeEvent(self, event):
-        """Save settings when window closes"""
-        self.save_settings()
-        event.accept()
-
+            # Save bash path on Windows
+            if sys.platform == "win32" and self.bash_path_edit:
+                settings['bash_path'] = self.bash_path_edit.text()
 
 def main():
     """Main entry point"""

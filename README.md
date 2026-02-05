@@ -1,171 +1,153 @@
-# File Organizer - Year-based Folders
+# 🗂️ File Organizer
 
-A simple and elegant tool to organize files and folders into year-based directories using creation/modification dates.
+**Automatically organize files and folders into year-based directories.**
 
-## Features
+Transform this mess:
+```
+Documents/
+├─ report.pdf (2023)
+├─ photo.jpg (2024)
+├─ OldProject/ (2022)
+└─ invoice.pdf (2025)
+```
 
-- 🗂️ **Automatic Organization**: Moves files and folders into year-based directories (e.g., 2023/, 2024/)
-- 🎯 **Smart Date Detection**: Uses file/folder creation time with modification time fallback
-- 🖥️ **Dual Interface**: Command-line script + modern GUI
-- 🔍 **Selective Processing**: Choose specific folders to process
-- 🛡️ **Safe Mode**: Dry-run preview before making changes
-- 📦 **Directory Support**: Moves entire folders as units (non-recursive)
-- ⚠️ **Duplicate Handling**: Interactive resolution for conflicts
+Into this:
+```
+Documents/
+├─ 2022/OldProject/
+├─ 2023/report.pdf
+├─ 2024/photo.jpg
+└─ 2025/invoice.pdf
+```
 
-## Installation
+---
 
-### Prerequisites
+## ✨ Features
 
-- **Git Bash** (Windows) or **Bash** (Linux/macOS)
-- **Python 3.8+**
+🎯 **Smart Date Detection** - Uses creation/modification date
+🖥️ **Modern GUI + CLI** - Choose your preferred interface
+🛡️ **Safe Mode** - Preview changes before applying
+📦 **Folder Support** - Moves entire directories as units
+💾 **Settings Memory** - Remembers your last preferences
+🪟 **Windows Integration** - Configure Git Bash vs WSL path
 
-### Setup
+---
 
-1. **Create a virtual environment**:
-   ```bash
-   python -m venv venv
-   ```
+## 🚀 Quick Start
 
-2. **Activate the virtual environment**:
-   - Windows (Git Bash): `source venv/Scripts/activate`
-   - Linux/macOS: `source venv/bin/activate`
+### ⚡ One-Click Launch (Recommended)
 
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+**Windows:**
+```cmd
+launch.bat
+```
+Or double-click `launch.bat`
 
-## Usage
+**Linux/macOS:**
+```bash
+./launch.sh
+```
 
-### GUI (Recommended)
+The launcher automatically:
+- ✅ Checks Python installation
+- ✅ Creates virtual environment (if needed)
+- ✅ Installs dependencies
+- ✅ Launches the GUI
+- ❌ Fails fast with clear error messages
 
-Launch the graphical interface:
+### 🔧 Manual Setup
+
+If you prefer manual control:
 
 ```bash
+python -m venv .venv
+source .venv/Scripts/activate  # Windows Git Bash
+source .venv/bin/activate       # Linux/macOS
+pip install -r requirements.txt
 python org_docs_gui.py
 ```
 
-**Features**:
-- Browse and select source/target directories
-- Tree view with folder preview (only top-level folders selectable)
-- Year display next to each folder name with modification date tooltip
-- Toggle options (Dry Run, Interactive, Verbose)
-- Real-time log output with color coding
-- Select/Deselect all folders
-- Automatic settings persistence (paths, options, splitter position)
+---
 
-### Command Line
+## 📖 How to Use
 
-Run the bash script directly:
+1. Launch GUI (see Quick Start above)
+2. Select source folder
+3. Check folders to organize
+4. Enable **Dry Run** (preview mode)
+5. Click **▶ Run**
+6. Review output, then uncheck Dry Run and run again
+
+---
+
+## 📟 Command Line (Advanced)
 
 ```bash
-# Preview changes (dry run)
+# Preview changes
 ./org_docs.sh --dry-run
 
-# Interactive folder selection
+# Interactive selection
 ./org_docs.sh --choose-includes --dry-run
 
 # Process specific folders
-./org_docs.sh --include "Drive-Documents" --include "FlashDMS" --dry-run
+./org_docs.sh --include "Documents" --include "Photos"
 
-# Run for real (remove --dry-run when ready)
-./org_docs.sh --include "Drive-Documents"
+# Filter by year or type
+./org_docs.sh --year 2023 --type pdf,gdoc
 ```
 
-### Options
+**Common Options:**
+- `--source-dir PATH` - Source folder
+- `--target-dir PATH` - Where to create year folders
+- `--dry-run` - Preview only (safe mode)
+- `--interactive` - Confirm each move
+- `--verbose` - Detailed output
 
-```
---source-dir PATH     Directory to process files from (default: current dir)
---target-dir PATH     Where to create year folders (default: source dir)
---dry-run             Preview changes without moving files
---include DIR         Include specific directory (repeatable)
---exclude DIR         Exclude specific directory (repeatable)
---choose-includes     Interactively select folders to process
---choose-excludes     Interactively select folders to exclude
---interactive         Prompt before each move
---verbose             Show detailed output
---year YYYY           Process only files from specific year
---type EXT            Process only specific file types (comma-separated)
---help                Show help message
-```
+---
 
-## How It Works
+## 💡 How It Works
 
-1. **Scans** the source directory for files and top-level subdirectories
-2. **Detects** creation date (falls back to modification date)
-3. **Creates** year-based folders (e.g., `2023/`, `2024/`)
-4. **Moves** files and entire subdirectories to appropriate year folders
-5. **Handles** duplicates interactively (rename/merge/skip)
+1️⃣ Scans source directory
+2️⃣ Reads creation/modification dates
+3️⃣ Groups items by year
+4️⃣ Moves to year folders (e.g., `2023/`, `2024/`)
+5️⃣ Handles duplicates intelligently
 
-## Examples
+---
 
-### GUI Workflow
+## 🛡️ Safety
 
-1. Launch GUI: `python org_docs_gui.py`
-2. Click **Browse** to select source directory
-3. Check **Dry Run** to preview
-4. Select folders in tree view (only top-level)
-5. Click **▶ Run** and monitor log output
-6. Review results, uncheck **Dry Run** when ready
-7. Run again to apply changes
+✅ **Dry Run Default** - GUI starts in preview mode
+✅ **Settings Saved** - Remembers paths and preferences
+✅ **Duplicate Handling** - Rename, merge, or skip conflicts
+✅ **Non-Destructive** - Files preserved during moves
 
-### Command Line Examples
+---
 
+## 📦 Requirements
+
+- **Python 3.8+**
+- **Git Bash** (Windows) or Bash (Linux/macOS)
+- **PySide6** (auto-installed via requirements.txt)
+
+---
+
+## 🐛 Troubleshooting
+
+**GUI won't launch?**
 ```bash
-# Preview all changes
-./org_docs.sh --dry-run
-
-# Interactively choose folders
-./org_docs.sh --choose-includes --dry-run
-
-# Process only Google Docs
-./org_docs.sh --type gdoc,gsheet --dry-run
-
-# Process only 2023 files
-./org_docs.sh --year 2023
-
-# Organize to parent directory
-./org_docs.sh --target-dir ..
-```
-
-## Project Structure
-
-```
-py-reorganizer/
-├── org_docs.sh           # Bash script (core logic)
-├── org_docs_gui.py       # PySide6 GUI wrapper
-├── requirements.txt      # Python dependencies
-└── README.md            # This file
-```
-
-## Safety Features
-
-- **Dry Run Default**: GUI starts with dry-run enabled
-- **Interactive Duplicates**: Always prompts for duplicate handling
-- **Non-Destructive**: Original files preserved during moves
-- **Rollback**: Use `--interactive` mode for per-file confirmation
-
-## Troubleshooting
-
-### "Script Not Found" Error
-Ensure `org_docs.sh` is in the same directory as `org_docs_gui.py`
-
-### "bash: command not found" (Windows)
-Install Git Bash from https://git-scm.com/downloads
-
-### GUI Not Launching
-```bash
-# Check Python version (3.8+ required)
-python --version
-
-# Reinstall dependencies
+python --version  # Check 3.8+
 pip install --upgrade -r requirements.txt
 ```
 
-## License
+**"bash command not found" (Windows)?**
+Install [Git Bash](https://git-scm.com/downloads)
 
-Free to use and modify.
+**Using Windows and script fails?**
+By default, `bash` command launches WSL bash. To use Git Bash:
+1. In the GUI, find "Bash Configuration (Windows)" section
+2. Set path to: `C:\Program Files\Git\bin\bash.exe`
+3. Or click Browse to locate it
+4. Path is saved automatically
 
-## Contributing
-
-Suggestions and improvements welcome!
+**Made with ❤️ for organizing chaos**
