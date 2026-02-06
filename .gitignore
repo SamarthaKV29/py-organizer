@@ -28,6 +28,12 @@ wheels/
 org_docs_gui.json
 *.json.bak
 
+# Backups and legacy
+org_docs_gui_old.py
+org_docs_gui_new.py
+*.py.bak
+*.sh.bak
+
 # IDE
 .vscode/
 .idea/

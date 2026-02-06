@@ -1,198 +1,88 @@
 #!/usr/bin/env python3
 """
-org_docs_gui.py - GUI wrapper for org_docs.sh script
-Simple and elegant PySide6 interface for organizing files into year-based folders.
+org_docs_gui.py - GUI for Python File Organizer
+Modern PySide6 interface for organizing files into year-based folders.
+Pure Python implementation - no bash dependencies.
 """
 
 import sys
-import os
 import json
-import re
-import subprocess
 from pathlib import Path
 from datetime import datetime
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QFileDialog, QTreeWidget,
     QTreeWidgetItem, QCheckBox, QTextEdit, QGroupBox, QGridLayout,
-    QSplitter, QMessageBox
+    QSplitter, QMessageBox, QProgressBar
 )
-from PySide6.QtCore import Qt, QThread, Signal, QProcess
-from PySide6.QtGui import QIcon, QFont, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QFont, QKeySequence, QShortcut
+
+from file_organizer import FileOrganizer, OrganizerConfig, DuplicateMode
 
 
-def ansi_to_html(text):
-    """Convert ANSI color codes to HTML spans"""
-    # ANSI color code mappings
-    ansi_colors = {
-        '0;30': '#000000',  # Black
-        '0;31': '#f44336',  # Red
-        '0;32': '#4CAF50',  # Green
-        '0;33': '#ff9800',  # Yellow
-        '0;34': '#2196F3',  # Blue
-        '0;35': '#9C27B0',  # Magenta
-        '0;36': '#00BCD4',  # Cyan
-        '0;37': '#d4d4d4',  # White
-        '1;30': '#666666',  # Bright Black (Gray)
-        '1;31': '#ff5252',  # Bright Red
-        '1;32': '#69F0AE',  # Bright Green
-        '1;33': '#FFD740',  # Bright Yellow
-        '1;34': '#448AFF',  # Bright Blue
-        '1;35': '#E040FB',  # Bright Magenta
-        '1;36': '#18FFFF',  # Bright Cyan
-        '1;37': '#ffffff',  # Bright White
-    }
+class OrganizerRunner(QThread):
+    """Background thread for running file organization"""
+    log_received = Signal(str, str)  # message, level
+    progress_updated = Signal(int, int)  # current, total
+    finished = Signal(object)  # stats
 
-    # Remove ANSI escape codes and replace with HTML
-    # Pattern: \033[XXXm or \x1b[XXXm
-    ansi_pattern = re.compile(r'\x1b\[([0-9;]+)m|\033\[([0-9;]+)m')
-
-    result = []
-    last_end = 0
-    open_span = False
-
-    for match in ansi_pattern.finditer(text):
-        # Add text before this match
-        result.append(text[last_end:match.start()])
-
-        code = match.group(1) or match.group(2)
-
-        if code == '0' or code == '':
-            # Reset code - close any open span
-            if open_span:
-                result.append('</span>')
-                open_span = False
-        elif code in ansi_colors:
-            # Close previous span if open
-            if open_span:
-                result.append('</span>')
-            # Open new colored span
-            color = ansi_colors[code]
-            result.append(f"<span style='color: {color};'>")
-            open_span = True
-
-        last_end = match.end()
-
-    # Add remaining text
-    result.append(text[last_end:])
-
-    # Close any remaining open span
-    if open_span:
-        result.append('</span>')
-
-    return ''.join(result)
-
-
-class ScriptRunner(QThread):
-    """Background thread for running the bash script"""
-    output_received = Signal(str)
-    process_finished = Signal(int)
-
-    def __init__(self, script_path, args):
+    def __init__(self, config: OrganizerConfig):
         super().__init__()
-        self.script_path = script_path
-        self.args = args
-        self.process = None
+        self.config = config
+        self.organizer = None
+        self._cancelled = False
 
     def run(self):
-        """Execute the bash script and stream output"""
+        """Execute file organization"""
         try:
-            # Use Git Bash on Windows
-            if sys.platform == "win32":
-                cmd = [self.args[0], str(self.script_path)] + self.args[1:]
-            else:
-                cmd = [str(self.script_path)] + self.args
-
-            # Windows: Create new process group for proper termination
-            # Unix: Use process group for killing child processes
-            if sys.platform == "win32":
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                )
-            else:
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True,
-                    start_new_session=True
-                )
-
-            # Stream output line by line
-            for line in iter(self.process.stdout.readline, ''):
-                if line:
-                    self.output_received.emit(line.rstrip())
-
-            self.process.wait()
-            self.process_finished.emit(self.process.returncode)
-
+            self.organizer = FileOrganizer(
+                config=self.config,
+                log_callback=self.log_received.emit,
+                progress_callback=self.progress_updated.emit
+            )
+            stats = self.organizer.organize()
+            self.finished.emit(stats)
         except Exception as e:
-            self.output_received.emit(f"Error: {str(e)}")
-            self.process_finished.emit(1)
+            self.log_received.emit(f"Fatal error: {str(e)}", "error")
+            self.finished.emit(None)
 
-    def stop(self):
-        """Terminate the running process and all child processes"""
-        if self.process and self.process.poll() is None:
-            try:
-                if sys.platform == "win32":
-                    # Windows: Kill entire process tree
-                    subprocess.run(
-                        ['taskkill', '/F', '/T', '/PID', str(self.process.pid)],
-                        capture_output=True,
-                        timeout=5
-                    )
-                else:
-                    # Unix: Kill process group
-                    import signal
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                    # Wait for graceful termination
-                    try:
-                        self.process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        # Force kill
-                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                        self.process.wait()
-            except Exception:
-                # Fallback to direct kill
-                try:
-                    self.process.kill()
-                    self.process.wait()
-                except Exception:
-                    pass
+    def cancel(self):
+        """Cancel the running operation"""
+        if self.organizer:
+            self.organizer.cancel()
 
 
 class OrgDocsGUI(QMainWindow):
-    """Main GUI window for org_docs.sh"""
+    """Main GUI window for file organizer"""
 
     SETTINGS_FILE = Path(__file__).parent / "org_docs_gui.json"
 
+    # Color mapping for log levels
+    LOG_COLORS = {
+        'info': '#61afef',
+        'success': '#4CAF50',
+        'warning': '#ff9800',
+        'error': '#f44336'
+    }
+
     def __init__(self):
         super().__init__()
-        self.script_path = Path(__file__).parent / "org_docs.sh"
         self.runner_thread = None
         self.source_dir = str(Path.home())
-        self.splitter = None  # Will be set in init_ui
-        self.bash_path_edit = None  # Windows-specific bash path
-        self.zoom_level = 1.0  # Default zoom level (100%)
+        self.splitter = None
+        self.zoom_level = 1.0
+        self.progress_bar = None
 
         self.init_ui()
         self.setup_shortcuts()
         self.load_settings()
-        # Load tree with saved/default path
         self.refresh_tree()
 
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("File Organizer - Year-based Folders")
-        self.setGeometry(100, 100, 900, 700)
+        self.setWindowTitle("File Organizer - Year-based Folders (Python)")
+        self.setGeometry(100, 100, 950, 750)
 
         # Central widget
         central_widget = QWidget()
@@ -202,7 +92,7 @@ class OrgDocsGUI(QMainWindow):
         # Create splitter for resizable sections
         self.splitter = QSplitter(Qt.Vertical)
 
-        # Top section (directory selection + tree + options)
+        # Top section
         top_widget = QWidget()
         top_layout = QVBoxLayout(top_widget)
 
@@ -248,6 +138,7 @@ class OrgDocsGUI(QMainWindow):
         self.tree_widget = QTreeWidget()
         self.tree_widget.setHeaderLabel("Folders")
         self.tree_widget.setAlternatingRowColors(True)
+        self.tree_widget.setMinimumHeight(150)  # Ensure tree is visible
         tree_layout.addWidget(self.tree_widget)
 
         tree_group.setLayout(tree_layout)
@@ -260,7 +151,40 @@ class OrgDocsGUI(QMainWindow):
         self.dry_run_cb = QCheckBox("Dry Run (preview only)")
         self.dry_run_cb.setChecked(True)
         self.interactive_cb = QCheckBox("Interactive")
+        self.interactive_cb.setEnabled(False)  # Not supported in GUI mode
+        self.interactive_cb.setToolTip("Not supported in GUI mode")
         self.verbose_cb = QCheckBox("Verbose")
+
+        # Checkbox styling
+        checkbox_style = """
+            QCheckBox {
+                spacing: 8px;
+                color: #e0e0e0;
+                font-size: 10pt;
+            }
+            QCheckBox::indicator {
+                width: 20px;
+                height: 20px;
+                border: 2px solid #666;
+                border-radius: 3px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:hover {
+                border: 2px solid #4CAF50;
+                background-color: #3d3d3d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4CAF50;
+                border: 2px solid #4CAF50;
+            }
+            QCheckBox::indicator:disabled {
+                background-color: #1a1a1a;
+                border-color: #444;
+            }
+        """
+
+        for cb in [self.dry_run_cb, self.interactive_cb, self.verbose_cb]:
+            cb.setStyleSheet(checkbox_style)
 
         options_layout.addWidget(self.dry_run_cb)
         options_layout.addWidget(self.interactive_cb)
@@ -270,29 +194,13 @@ class OrgDocsGUI(QMainWindow):
         options_group.setLayout(options_layout)
         top_layout.addWidget(options_group)
 
-        # Windows-specific: Git Bash path configuration
-        if sys.platform == "win32":
-            bash_group = QGroupBox("Bash Configuration (Windows)")
-            bash_layout = QHBoxLayout()
-
-            bash_layout.addWidget(QLabel("Bash Path:"))
-            self.bash_path_edit = QLineEdit("C:/Program Files/Git/bin/bash.exe")
-            self.bash_path_edit.setPlaceholderText("Path to bash.exe (Git Bash)")
-            bash_layout.addWidget(self.bash_path_edit)
-
-            bash_browse_btn = QPushButton("Browse...")
-            bash_browse_btn.clicked.connect(self.browse_bash)
-            bash_layout.addWidget(bash_browse_btn)
-
-            bash_group.setLayout(bash_layout)
-            top_layout.addWidget(bash_group)
-
         self.splitter.addWidget(top_widget)
 
         # Bottom section (log output)
         log_widget = QWidget()
         log_layout = QVBoxLayout(log_widget)
 
+        # Log header with controls
         log_header = QHBoxLayout()
         log_label = QLabel("Log Output")
         log_label.setFont(QFont("Arial", 10, QFont.Bold))
@@ -320,13 +228,18 @@ class OrgDocsGUI(QMainWindow):
 
         log_header.addStretch()
 
+        # Action buttons
         self.run_btn = QPushButton("▶ Run")
-        self.run_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;")
-        self.run_btn.clicked.connect(self.run_script)
+        self.run_btn.setStyleSheet(
+            "background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;"
+        )
+        self.run_btn.clicked.connect(self.run_organizer)
 
         self.stop_btn = QPushButton("⏹ Stop")
-        self.stop_btn.setStyleSheet("background-color: #f44336; color: white; font-weight: bold; padding: 8px;")
-        self.stop_btn.clicked.connect(self.stop_script)
+        self.stop_btn.setStyleSheet(
+            "background-color: #f44336; color: white; font-weight: bold; padding: 8px;"
+        )
+        self.stop_btn.clicked.connect(self.stop_organizer)
         self.stop_btn.setEnabled(False)
 
         clear_btn = QPushButton("Clear Log")
@@ -338,6 +251,26 @@ class OrgDocsGUI(QMainWindow):
 
         log_layout.addLayout(log_header)
 
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #555;
+                border-radius: 5px;
+                text-align: center;
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 3px;
+            }
+        """)
+        log_layout.addWidget(self.progress_bar)
+
+        # Log output
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setFont(QFont("Consolas", 9))
@@ -345,30 +278,25 @@ class OrgDocsGUI(QMainWindow):
         log_layout.addWidget(self.log_output)
 
         self.splitter.addWidget(log_widget)
-
-        # Set splitter sizes (60% top, 40% bottom)
         self.splitter.setSizes([420, 280])
 
         main_layout.addWidget(self.splitter)
 
-        # Tree will be loaded after settings are restored
-
     def setup_shortcuts(self):
         """Setup keyboard shortcuts"""
-        # Zoom shortcuts
         QShortcut(QKeySequence("Ctrl++"), self).activated.connect(self.zoom_in)
-        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.zoom_in)  # Ctrl+= is same key as Ctrl++
+        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.zoom_in)
         QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self.zoom_out)
         QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.zoom_reset)
 
     def zoom_in(self):
         """Increase UI zoom level"""
-        self.zoom_level = min(self.zoom_level + 0.1, 2.0)  # Max 200%
+        self.zoom_level = min(self.zoom_level + 0.1, 2.0)
         self.apply_zoom()
 
     def zoom_out(self):
         """Decrease UI zoom level"""
-        self.zoom_level = max(self.zoom_level - 0.1, 0.5)  # Min 50%
+        self.zoom_level = max(self.zoom_level - 0.1, 0.5)
         self.apply_zoom()
 
     def zoom_reset(self):
@@ -378,18 +306,9 @@ class OrgDocsGUI(QMainWindow):
 
     def apply_zoom(self):
         """Apply current zoom level to UI elements"""
-        # Update zoom label
         self.zoom_label.setText(f"{int(self.zoom_level * 100)}%")
-
-        # Apply to log output font
-        log_font = QFont("Consolas", int(9 * self.zoom_level))
-        self.log_output.setFont(log_font)
-
-        # Apply to tree widget font
-        tree_font = QFont("Arial", int(9 * self.zoom_level))
-        self.tree_widget.setFont(tree_font)
-
-        # Save zoom level
+        self.log_output.setFont(QFont("Consolas", int(9 * self.zoom_level)))
+        self.tree_widget.setFont(QFont("Arial", int(9 * self.zoom_level)))
         self.save_settings()
 
     def browse_source(self):
@@ -406,22 +325,11 @@ class OrgDocsGUI(QMainWindow):
     def browse_target(self):
         """Browse for target directory"""
         dir_path = QFileDialog.getExistingDirectory(
-            self, "Select Target Directory", self.target_edit.text() or self.source_edit.text()
+            self, "Select Target Directory",
+            self.target_edit.text() or self.source_edit.text()
         )
         if dir_path:
             self.target_edit.setText(dir_path)
-            self.save_settings()
-
-    def browse_bash(self):
-        """Browse for bash executable (Windows only)"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Bash Executable",
-            "C:/Program Files/Git/bin",
-            "Executable Files (*.exe);;All Files (*.*)"
-        )
-        if file_path:
-            self.bash_path_edit.setText(file_path)
             self.save_settings()
 
     def refresh_tree(self):
@@ -430,64 +338,64 @@ class OrgDocsGUI(QMainWindow):
         source_path = Path(self.source_edit.text())
 
         if not source_path.exists():
-            self.log_output.append(f"<span style='color: #f44336;'>Source directory does not exist: {source_path}</span>")
+            self.append_log(f"Source directory does not exist: {source_path}", "error")
             return
 
         try:
-            # Get all top-level subdirectories
             subdirs = [d for d in source_path.iterdir() if d.is_dir()]
             subdirs.sort(key=lambda x: x.name.lower())
 
             for subdir in subdirs:
-                # Get directory date
+                # Get directory info
                 try:
-                    mod_time = subdir.stat().st_mtime
-                    date_str = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d')
-                    year = datetime.fromtimestamp(mod_time).strftime('%Y')
-                except:
-                    date_str = 'unknown'
-                    year = '?'
+                    stat_info = subdir.stat()
+                    mod_time = datetime.fromtimestamp(stat_info.st_mtime)
+                    year = mod_time.year
+                    file_count = len([f for f in subdir.iterdir() if f.is_file()])
+                    display_text = f"{subdir.name}  [{year}]"
+                except Exception:
+                    display_text = subdir.name
 
-                # Create top-level item with checkbox
-                item = QTreeWidgetItem(self.tree_widget)
-                item.setText(0, f"{subdir.name}  [{year}]")
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item = QTreeWidgetItem([display_text])
                 item.setCheckState(0, Qt.Unchecked)
-                item.setData(0, Qt.UserRole, str(subdir))
-                item.setToolTip(0, f"Modified: {date_str}")
+                item.setData(0, Qt.UserRole, subdir.name)
 
-                # Add child items (not checkable, just for preview)
+                # Add child folders (one level deep for expandability)
                 try:
-                    children = list(subdir.iterdir())[:50]  # Limit to 50 items
-                    for child in children:
-                        child_item = QTreeWidgetItem(item)
-                        child_item.setText(0, f"{'📁' if child.is_dir() else '📄'} {child.name}")
-                        child_item.setFlags(child_item.flags() & ~Qt.ItemIsUserCheckable)
-                        child_item.setForeground(0, Qt.gray)
+                    child_dirs = [d for d in subdir.iterdir() if d.is_dir()]
+                    child_dirs.sort(key=lambda x: x.name.lower())
 
-                    if len(list(subdir.iterdir())) > 50:
-                        more_item = QTreeWidgetItem(item)
-                        more_item.setText(0, "... (more items)")
-                        more_item.setForeground(0, Qt.gray)
-                except PermissionError:
-                    pass
+                    for child_dir in child_dirs:
+                        try:
+                            child_stat = child_dir.stat()
+                            child_mod = datetime.fromtimestamp(child_stat.st_mtime)
+                            child_year = child_mod.year
+                            child_text = f"{child_dir.name}  [{child_year}]"
+                        except Exception:
+                            child_text = child_dir.name
 
-            self.log_output.append(f"<span style='color: #4CAF50;'>Loaded {len(subdirs)} folders from {source_path}</span>")
+                        child_item = QTreeWidgetItem([child_text])
+                        child_item.setData(0, Qt.UserRole, child_dir.name)
+                        item.addChild(child_item)
+                except Exception:
+                    pass  # Skip if can't read subdirectories
+
+                self.tree_widget.addTopLevelItem(item)
+
+            self.append_log(f"Loaded {len(subdirs)} folders from {source_path}", "success")
 
         except Exception as e:
-            self.log_output.append(f"<span style='color: #f44336;'>Error loading folders: {str(e)}</span>")
+            self.append_log(f"Error loading folders: {str(e)}", "error")
 
     def select_all(self):
         """Select all top-level folders"""
         for i in range(self.tree_widget.topLevelItemCount()):
-            item = self.tree_widget.topLevelItem(i)
-            item.setCheckState(0, Qt.Checked)
+            self.tree_widget.topLevelItem(i).setCheckState(0, Qt.Checked)
 
     def deselect_all(self):
         """Deselect all top-level folders"""
         for i in range(self.tree_widget.topLevelItemCount()):
-            item = self.tree_widget.topLevelItem(i)
-            item.setCheckState(0, Qt.Unchecked)
+            self.tree_widget.topLevelItem(i).setCheckState(0, Qt.Unchecked)
 
     def get_selected_folders(self):
         """Get list of selected folder names"""
@@ -495,144 +403,111 @@ class OrgDocsGUI(QMainWindow):
         for i in range(self.tree_widget.topLevelItemCount()):
             item = self.tree_widget.topLevelItem(i)
             if item.checkState(0) == Qt.Checked:
-                # Extract just the folder name (remove year suffix like "  [2024]")
-                folder_text = item.text(0)
-                folder_name = folder_text.split('  [')[0] if '  [' in folder_text else folder_text
+                folder_name = item.data(0, Qt.UserRole)
                 selected.append(folder_name)
         return selected
 
-    def build_command_args(self):
-        """Build command line arguments for the script"""
-        args = []
-
-        # Source directory
-        source = self.source_edit.text()
-        if source:
-            args.extend(["--source-dir", source])
-
-        # Target directory
-        target = self.target_edit.text()
-        if target:
-            args.extend(["--target-dir", target])
-
-        # Options
-        if self.dry_run_cb.isChecked():
-            args.append("--dry-run")
-
-        if self.interactive_cb.isChecked():
-            args.append("--interactive")
-
-        if self.verbose_cb.isChecked():
-            args.append("--verbose")
-
-        # Selected folders
-        selected_folders = self.get_selected_folders()
-        if selected_folders:
-            for folder in selected_folders:
-                args.extend(["--include", folder])
-
-        return args
-
-    def run_script(self):
-        """Run the org_docs.sh script"""
-        if not self.script_path.exists():
+    def run_organizer(self):
+        """Run the file organizer"""
+        source_path = Path(self.source_edit.text())
+        if not source_path.exists():
             QMessageBox.critical(
                 self,
-                "Script Not Found",
-                f"Cannot find org_docs.sh at:\n{self.script_path}\n\nPlease ensure the script is in the same directory as this GUI."
+                "Invalid Source",
+                f"Source directory does not exist:\n{source_path}"
             )
             return
 
-        # Windows: Check bash path
-        bash_exe = None
-        if sys.platform == "win32":
-            if self.bash_path_edit:
-                bash_exe = self.bash_path_edit.text()
-                if bash_exe and not Path(bash_exe).exists():
-                    reply = QMessageBox.warning(
-                        self,
-                        "Bash Not Found",
-                        f"Bash executable not found at:\n{bash_exe}\n\nContinue with default 'bash' command (may use WSL)?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No
-                    )
-                    if reply == QMessageBox.No:
-                        return
-                    bash_exe = "bash"  # Fallback to default
-            else:
-                bash_exe = "bash"
-
+        # Get configuration
         selected_folders = self.get_selected_folders()
-        if not selected_folders:
+        files_only = len(selected_folders) == 0
+
+        if files_only:
             reply = QMessageBox.question(
                 self,
                 "No Folders Selected",
-                "No folders are selected. This will process ALL top-level items.\n\nContinue?",
+                "No folders are selected. This will process ONLY FILES (directories will be skipped).\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No
             )
             if reply == QMessageBox.No:
                 return
 
-        args = self.build_command_args()
+        # Build configuration
+        target_path = Path(self.target_edit.text()) if self.target_edit.text() else None
 
-        # Prepend bash executable for Windows
-        if sys.platform == "win32" and bash_exe:
-            args = [bash_exe] + args
+        config = OrganizerConfig(
+            source_dir=source_path,
+            target_dir=target_path,
+            dry_run=self.dry_run_cb.isChecked(),
+            files_only=files_only,
+            verbose=self.verbose_cb.isChecked(),
+            duplicate_mode=DuplicateMode.RENAME,
+            included_folders=selected_folders if selected_folders else None
+        )
 
+        # Clear log and show progress
         self.log_output.clear()
-        display_cmd = f"bash {self.script_path.name} {' '.join(args[1:] if sys.platform == 'win32' else args)}"
-        self.log_output.append(f"<span style='color: #61afef;'>Running: {display_cmd}</span>")
-        self.log_output.append("<span style='color: #61afef;'>" + "─" * 80 + "</span>")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+
+        # Log configuration
+        self.append_log(f"Starting file organization...", "info")
+        self.append_log(f"Source: {config.source_dir}", "info")
+        self.append_log(f"Target: {config.target_dir}", "info")
+        if config.dry_run:
+            self.append_log("DRY RUN MODE - No changes will be made", "warning")
+        if files_only:
+            self.append_log("FILES ONLY mode - Directories will be skipped", "info")
+        self.append_log("─" * 80, "info")
 
         # Disable run button, enable stop button
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
 
         # Start runner thread
-        self.runner_thread = ScriptRunner(self.script_path, args)
-        self.runner_thread.output_received.connect(self.append_log)
-        self.runner_thread.process_finished.connect(self.on_process_finished)
+        self.runner_thread = OrganizerRunner(config)
+        self.runner_thread.log_received.connect(self.append_log)
+        self.runner_thread.progress_updated.connect(self.update_progress)
+        self.runner_thread.finished.connect(self.on_finished)
         self.runner_thread.start()
 
-    def stop_script(self):
-        """Stop the running script"""
+    def stop_organizer(self):
+        """Stop the running organizer"""
         if self.runner_thread and self.runner_thread.isRunning():
-            # Disable stop button immediately to prevent multiple clicks
             self.stop_btn.setEnabled(False)
-            self.runner_thread.stop()
-            self.log_output.append("<span style='color: #f44336;'>⏹ Process terminated by user</span>")
+            self.runner_thread.cancel()
+            self.append_log("Cancelling operation...", "warning")
 
-    def append_log(self, text):
-        """Append text to log output with color coding"""
-
-
-        # Then apply additional keyword-based color coding (only if no color already applied)
-        if '<span' not in text:
-            if "error" in text.lower() or "failed" in text.lower():
-                text = f"<span style='color: #f44336;'>{text}</span>"
-            elif "success" in text.lower() or "moved" in text.lower():
-                text = f"<span style='color: #4CAF50;'>{text}</span>"
-            elif "warning" in text.lower() or "skip" in text.lower():
-                text = f"<span style='color: #ff9800;'>{text}</span>"
-            elif "dry-run" in text.lower():
-                text = f"<span style='color: #2196F3;'>{text}</span>"
-            else:
-                text = f"<span style='color: #d4d4d4;'>{text}</span>"
-
-        self.log_output.append(text)
+    def append_log(self, message: str, level: str = "info"):
+        """Append message to log output with color coding"""
+        color = self.LOG_COLORS.get(level, self.LOG_COLORS['info'])
+        html = f"<span style='color: {color};'>{message}</span>"
+        self.log_output.append(html)
 
         # Auto-scroll to bottom
         scrollbar = self.log_output.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def on_process_finished(self, exit_code):
-        """Handle process completion"""
-        self.log_output.append("<span style='color: #61afef;'>" + "─" * 80 + "</span>")
-        if exit_code == 0:
-            self.log_output.append("<span style='color: #4CAF50;'>✓ Process completed successfully</span>")
-        elif exit_code == -15 or exit_code == 143:  # SIGTERM
-            self.log_output.append("<span style='color: #ff9800;'>⚠ Process was terminated</span>")
+    def update_progress(self, current: int, total: int):
+        """Update progress bar"""
+        if total > 0:
+            self.progress_bar.setMaximum(total)
+            self.progress_bar.setValue(current)
+            percentage = int((current / total) * 100)
+            self.progress_bar.setFormat(f"{current}/{total} ({percentage}%)")
+
+    def on_finished(self, stats):
+        """Handle organizer completion"""
+        self.append_log("─" * 80, "info")
+
+        if stats:
+            self.append_log("✓ Operation completed", "success")
+        else:
+            self.append_log("✗ Operation failed", "error")
+
+        # Hide progress bar
+        self.progress_bar.setVisible(False)
 
         # Re-enable run button, disable stop button
         self.run_btn.setEnabled(True)
@@ -651,7 +526,6 @@ class OrgDocsGUI(QMainWindow):
             with open(self.SETTINGS_FILE, 'r') as f:
                 settings = json.load(f)
 
-            # Restore paths
             if 'source_dir' in settings and settings['source_dir']:
                 self.source_edit.setText(settings['source_dir'])
                 self.source_dir = settings['source_dir']
@@ -659,33 +533,21 @@ class OrgDocsGUI(QMainWindow):
             if 'target_dir' in settings:
                 self.target_edit.setText(settings['target_dir'])
 
-            # Restore checkboxes
-            if 'dry_run' in settings:
-                self.dry_run_cb.setChecked(settings['dry_run'])
-
-            if 'interactive' in settings:
-                self.interactive_cb.setChecked(settings['interactive'])
-
+            # Checkboxes (dry_run intentionally NOT restored - always defaults to ON)
             if 'verbose' in settings:
                 self.verbose_cb.setChecked(settings['verbose'])
 
-            # Restore splitter sizes
             if 'splitter_sizes' in settings and self.splitter:
                 self.splitter.setSizes(settings['splitter_sizes'])
 
-            # Restore bash path (Windows only)
-            if sys.platform == "win32" and 'bash_path' in settings and self.bash_path_edit:
-                self.bash_path_edit.setText(settings['bash_path'])
-
-            # Restore zoom level
             if 'zoom_level' in settings:
                 self.zoom_level = settings['zoom_level']
                 self.apply_zoom()
 
-            self.log_output.append("<span style='color: #4CAF50;'>✓ Settings loaded</span>")
+            self.append_log("✓ Settings loaded", "success")
 
         except Exception as e:
-            self.log_output.append(f"<span style='color: #ff9800;'>Warning: Could not load settings: {str(e)}</span>")
+            self.append_log(f"Warning: Could not load settings: {str(e)}", "warning")
 
     def save_settings(self):
         """Save settings to JSON file"""
@@ -693,16 +555,10 @@ class OrgDocsGUI(QMainWindow):
             settings = {
                 'source_dir': self.source_edit.text(),
                 'target_dir': self.target_edit.text(),
-                'dry_run': self.dry_run_cb.isChecked(),
-                'interactive': self.interactive_cb.isChecked(),
                 'verbose': self.verbose_cb.isChecked(),
                 'splitter_sizes': self.splitter.sizes() if self.splitter else [420, 280],
                 'zoom_level': self.zoom_level
             }
-
-            # Save bash path on Windows
-            if sys.platform == "win32" and self.bash_path_edit:
-                settings['bash_path'] = self.bash_path_edit.text()
 
             with open(self.SETTINGS_FILE, 'w') as f:
                 json.dump(settings, f, indent=2)
@@ -712,12 +568,9 @@ class OrgDocsGUI(QMainWindow):
 
     def closeEvent(self, event):
         """Save settings when window closes"""
-        # Stop any running thread before closing
         if self.runner_thread and self.runner_thread.isRunning():
-            self.runner_thread.stop()
-            # Wait up to 3 seconds for thread to finish
+            self.runner_thread.cancel()
             if not self.runner_thread.wait(3000):
-                # Force terminate if it doesn't stop
                 self.runner_thread.terminate()
                 self.runner_thread.wait()
 
@@ -728,7 +581,7 @@ class OrgDocsGUI(QMainWindow):
 def main():
     """Main entry point"""
     app = QApplication(sys.argv)
-    app.setStyle("Fusion")  # Modern cross-platform style
+    app.setStyle("Fusion")
 
     window = OrgDocsGUI()
     window.show()

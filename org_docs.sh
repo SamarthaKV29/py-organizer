@@ -22,6 +22,7 @@ set -euo pipefail
 SOURCE_DIR="$(pwd)"  # Default to current directory
 TARGET_BASE_DIR=""  # Will default to SOURCE_DIR if not set
 DRY_RUN=false
+FILES_ONLY=false  # Skip all directories, process only files
 TARGET_YEAR=""
 FILE_TYPE=""
 INTERACTIVE=false
@@ -30,6 +31,7 @@ CHOOSE_INCLUDES=false
 EXCLUDED_DIRS=("2020" "2021" "2022" "2023" "2024" "2025" "2026")
 INCLUDED_DIRS=()
 VERBOSE=false
+DUPLICATE_MODE="interactive"  # interactive, skip, or rename
 
 # Colors for output
 RED='\033[0;31m'
@@ -57,11 +59,14 @@ Options:
     --source-dir PATH    Directory to process files from (default: current directory)
     --target-dir PATH    Where to create year folders (default: source directory)
     --dry-run            Show what would be done without making changes
+    --files-only         Process only files, skip all subdirectories
     --exclude DIR        Exclude directory (can be used multiple times)
     --include DIR        Include directory (can be used multiple times, overrides excludes)
     --choose-excludes    Interactively select subdirectories to exclude before processing
     --choose-includes    Interactively select ONLY subdirectories to process (overrides excludes)
     --interactive        Prompt for confirmation before each move
+    --skip-duplicates    Automatically skip duplicate files (non-interactive)
+    --rename-duplicates  Automatically rename duplicate files with timestamp
     --verbose            Show detailed output
     --help               Show this help message
 
@@ -118,6 +123,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --interactive)
             INTERACTIVE=true
+            shift
+            ;;
+        --skip-duplicates)
+            DUPLICATE_MODE="skip"
+            shift
+            ;;
+        --rename-duplicates)
+            DUPLICATE_MODE="rename"
+            shift
+            ;;
+        --files-only)
+            FILES_ONLY=true
             shift
             ;;
         --verbose)
@@ -392,6 +409,34 @@ handle_duplicate() {
     echo -e "  Source size: ${src_size} bytes"
     echo -e "  Existing size: ${dest_size} bytes"
 
+    # Handle based on duplicate mode
+    if [[ "$DUPLICATE_MODE" == "skip" ]]; then
+        echo -e "${YELLOW}Skipping duplicate file (auto-skip mode)${NC}"
+        FILES_SKIPPED=$((FILES_SKIPPED + 1))
+        return 1
+    elif [[ "$DUPLICATE_MODE" == "rename" ]]; then
+        local timestamp
+        local base
+        local ext
+        local new_name
+        local new_dest
+        timestamp=$(date -r "$src" +"%Y%m%d_%H%M%S" 2>/dev/null || stat -f "%Sm" -t "%Y%m%d_%H%M%S" "$src" 2>/dev/null)
+        base="${filename%.*}"
+        ext=$(get_extension "$filename")
+        new_name="${base}_${timestamp}"
+        [[ -n "$ext" ]] && new_name="${new_name}.${ext}"
+        new_dest="$(dirname "$dest")/$new_name"
+
+        echo -e "${GREEN}Auto-renaming to: $new_name${NC}"
+        if [[ "$DRY_RUN" == false ]]; then
+            mv "$src" "$new_dest"
+            echo -e "${GREEN}Moved (renamed): $src -> $new_dest${NC}"
+            FILES_RENAMED=$((FILES_RENAMED + 1))
+        fi
+        return 0
+    fi
+
+    # Interactive mode
     while true; do
         echo -e "\n${BLUE}Options:${NC}"
         echo "  [r] Rename and move (append timestamp)"
@@ -638,6 +683,12 @@ process_directory() {
 
         # Handle subdirectories
         if [[ -d "$file" ]]; then
+            # Skip all directories if --files-only is set
+            if [[ "$FILES_ONLY" == true ]]; then
+                [[ "$VERBOSE" == true ]] && echo -e "${YELLOW}Skipping directory (files-only mode): $file${NC}"
+                continue
+            fi
+
             # Check if directory is excluded
             if is_excluded "$file"; then
                 [[ "$VERBOSE" == true ]] && echo -e "${YELLOW}Excluding directory: $file${NC}"
