@@ -7,6 +7,7 @@ Simple and elegant PySide6 interface for organizing files into year-based folder
 import sys
 import os
 import json
+import re
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -17,7 +18,69 @@ from PySide6.QtWidgets import (
     QSplitter, QMessageBox
 )
 from PySide6.QtCore import Qt, QThread, Signal, QProcess
-from PySide6.QtGui import QIcon, QFont
+from PySide6.QtGui import QIcon, QFont, QKeySequence, QShortcut
+
+
+def ansi_to_html(text):
+    """Convert ANSI color codes to HTML spans"""
+    # ANSI color code mappings
+    ansi_colors = {
+        '0;30': '#000000',  # Black
+        '0;31': '#f44336',  # Red
+        '0;32': '#4CAF50',  # Green
+        '0;33': '#ff9800',  # Yellow
+        '0;34': '#2196F3',  # Blue
+        '0;35': '#9C27B0',  # Magenta
+        '0;36': '#00BCD4',  # Cyan
+        '0;37': '#d4d4d4',  # White
+        '1;30': '#666666',  # Bright Black (Gray)
+        '1;31': '#ff5252',  # Bright Red
+        '1;32': '#69F0AE',  # Bright Green
+        '1;33': '#FFD740',  # Bright Yellow
+        '1;34': '#448AFF',  # Bright Blue
+        '1;35': '#E040FB',  # Bright Magenta
+        '1;36': '#18FFFF',  # Bright Cyan
+        '1;37': '#ffffff',  # Bright White
+    }
+
+    # Remove ANSI escape codes and replace with HTML
+    # Pattern: \033[XXXm or \x1b[XXXm
+    ansi_pattern = re.compile(r'\x1b\[([0-9;]+)m|\033\[([0-9;]+)m')
+
+    result = []
+    last_end = 0
+    open_span = False
+
+    for match in ansi_pattern.finditer(text):
+        # Add text before this match
+        result.append(text[last_end:match.start()])
+
+        code = match.group(1) or match.group(2)
+
+        if code == '0' or code == '':
+            # Reset code - close any open span
+            if open_span:
+                result.append('</span>')
+                open_span = False
+        elif code in ansi_colors:
+            # Close previous span if open
+            if open_span:
+                result.append('</span>')
+            # Open new colored span
+            color = ansi_colors[code]
+            result.append(f"<span style='color: {color};'>")
+            open_span = True
+
+        last_end = match.end()
+
+    # Add remaining text
+    result.append(text[last_end:])
+
+    # Close any remaining open span
+    if open_span:
+        result.append('</span>')
+
+    return ''.join(result)
 
 
 class ScriptRunner(QThread):
@@ -40,14 +103,28 @@ class ScriptRunner(QThread):
             else:
                 cmd = [str(self.script_path)] + self.args
 
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
+            # Windows: Create new process group for proper termination
+            # Unix: Use process group for killing child processes
+            if sys.platform == "win32":
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+            else:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                    start_new_session=True
+                )
 
             # Stream output line by line
             for line in iter(self.process.stdout.readline, ''):
@@ -62,9 +139,34 @@ class ScriptRunner(QThread):
             self.process_finished.emit(1)
 
     def stop(self):
-        """Terminate the running process"""
-        if self.process:
-            self.process.terminate()
+        """Terminate the running process and all child processes"""
+        if self.process and self.process.poll() is None:
+            try:
+                if sys.platform == "win32":
+                    # Windows: Kill entire process tree
+                    subprocess.run(
+                        ['taskkill', '/F', '/T', '/PID', str(self.process.pid)],
+                        capture_output=True,
+                        timeout=5
+                    )
+                else:
+                    # Unix: Kill process group
+                    import signal
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    # Wait for graceful termination
+                    try:
+                        self.process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        # Force kill
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                        self.process.wait()
+            except Exception:
+                # Fallback to direct kill
+                try:
+                    self.process.kill()
+                    self.process.wait()
+                except Exception:
+                    pass
 
 
 class OrgDocsGUI(QMainWindow):
@@ -79,9 +181,13 @@ class OrgDocsGUI(QMainWindow):
         self.source_dir = str(Path.home())
         self.splitter = None  # Will be set in init_ui
         self.bash_path_edit = None  # Windows-specific bash path
+        self.zoom_level = 1.0  # Default zoom level (100%)
 
         self.init_ui()
+        self.setup_shortcuts()
         self.load_settings()
+        # Load tree with saved/default path
+        self.refresh_tree()
 
     def init_ui(self):
         """Initialize the user interface"""
@@ -191,6 +297,27 @@ class OrgDocsGUI(QMainWindow):
         log_label = QLabel("Log Output")
         log_label.setFont(QFont("Arial", 10, QFont.Bold))
         log_header.addWidget(log_label)
+
+        # Zoom controls
+        zoom_out_btn = QPushButton("🔍-")
+        zoom_out_btn.setToolTip("Zoom Out (Ctrl+-)")
+        zoom_out_btn.clicked.connect(self.zoom_out)
+        log_header.addWidget(zoom_out_btn)
+
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setStyleSheet("color: #888; font-size: 9pt;")
+        log_header.addWidget(self.zoom_label)
+
+        zoom_in_btn = QPushButton("🔍+")
+        zoom_in_btn.setToolTip("Zoom In (Ctrl++)")
+        zoom_in_btn.clicked.connect(self.zoom_in)
+        log_header.addWidget(zoom_in_btn)
+
+        zoom_reset_btn = QPushButton("↺")
+        zoom_reset_btn.setToolTip("Reset Zoom (Ctrl+0)")
+        zoom_reset_btn.clicked.connect(self.zoom_reset)
+        log_header.addWidget(zoom_reset_btn)
+
         log_header.addStretch()
 
         self.run_btn = QPushButton("▶ Run")
@@ -224,8 +351,46 @@ class OrgDocsGUI(QMainWindow):
 
         main_layout.addWidget(self.splitter)
 
-        # Initial tree load
-        self.refresh_tree()
+        # Tree will be loaded after settings are restored
+
+    def setup_shortcuts(self):
+        """Setup keyboard shortcuts"""
+        # Zoom shortcuts
+        QShortcut(QKeySequence("Ctrl++"), self).activated.connect(self.zoom_in)
+        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.zoom_in)  # Ctrl+= is same key as Ctrl++
+        QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self.zoom_out)
+        QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.zoom_reset)
+
+    def zoom_in(self):
+        """Increase UI zoom level"""
+        self.zoom_level = min(self.zoom_level + 0.1, 2.0)  # Max 200%
+        self.apply_zoom()
+
+    def zoom_out(self):
+        """Decrease UI zoom level"""
+        self.zoom_level = max(self.zoom_level - 0.1, 0.5)  # Min 50%
+        self.apply_zoom()
+
+    def zoom_reset(self):
+        """Reset zoom to 100%"""
+        self.zoom_level = 1.0
+        self.apply_zoom()
+
+    def apply_zoom(self):
+        """Apply current zoom level to UI elements"""
+        # Update zoom label
+        self.zoom_label.setText(f"{int(self.zoom_level * 100)}%")
+
+        # Apply to log output font
+        log_font = QFont("Consolas", int(9 * self.zoom_level))
+        self.log_output.setFont(log_font)
+
+        # Apply to tree widget font
+        tree_font = QFont("Arial", int(9 * self.zoom_level))
+        self.tree_widget.setFont(tree_font)
+
+        # Save zoom level
+        self.save_settings()
 
     def browse_source(self):
         """Browse for source directory"""
@@ -330,7 +495,10 @@ class OrgDocsGUI(QMainWindow):
         for i in range(self.tree_widget.topLevelItemCount()):
             item = self.tree_widget.topLevelItem(i)
             if item.checkState(0) == Qt.Checked:
-                selected.append(item.text(0))
+                # Extract just the folder name (remove year suffix like "  [2024]")
+                folder_text = item.text(0)
+                folder_name = folder_text.split('  [')[0] if '  [' in folder_text else folder_text
+                selected.append(folder_name)
         return selected
 
     def build_command_args(self):
@@ -429,23 +597,28 @@ class OrgDocsGUI(QMainWindow):
 
     def stop_script(self):
         """Stop the running script"""
-        if self.runner_thread:
+        if self.runner_thread and self.runner_thread.isRunning():
+            # Disable stop button immediately to prevent multiple clicks
+            self.stop_btn.setEnabled(False)
             self.runner_thread.stop()
-            self.log_output.append("<span style='color: #f44336;'>Process terminated by user</span>")
+            self.log_output.append("<span style='color: #f44336;'>⏹ Process terminated by user</span>")
 
     def append_log(self, text):
         """Append text to log output with color coding"""
-        # Simple color coding based on content
-        if "error" in text.lower() or "failed" in text.lower():
-            text = f"<span style='color: #f44336;'>{text}</span>"
-        elif "success" in text.lower() or "moved" in text.lower():
-            text = f"<span style='color: #4CAF50;'>{text}</span>"
-        elif "warning" in text.lower() or "skip" in text.lower():
-            text = f"<span style='color: #ff9800;'>{text}</span>"
-        elif "dry-run" in text.lower():
-            text = f"<span style='color: #2196F3;'>{text}</span>"
-        else:
-            text = f"<span style='color: #d4d4d4;'>{text}</span>"
+
+
+        # Then apply additional keyword-based color coding (only if no color already applied)
+        if '<span' not in text:
+            if "error" in text.lower() or "failed" in text.lower():
+                text = f"<span style='color: #f44336;'>{text}</span>"
+            elif "success" in text.lower() or "moved" in text.lower():
+                text = f"<span style='color: #4CAF50;'>{text}</span>"
+            elif "warning" in text.lower() or "skip" in text.lower():
+                text = f"<span style='color: #ff9800;'>{text}</span>"
+            elif "dry-run" in text.lower():
+                text = f"<span style='color: #2196F3;'>{text}</span>"
+            else:
+                text = f"<span style='color: #d4d4d4;'>{text}</span>"
 
         self.log_output.append(text)
 
@@ -455,11 +628,11 @@ class OrgDocsGUI(QMainWindow):
 
     def on_process_finished(self, exit_code):
         """Handle process completion"""
-        self.log_output.append("<span style='color: #61afef;'>{'─' * 80}</span>")
+        self.log_output.append("<span style='color: #61afef;'>" + "─" * 80 + "</span>")
         if exit_code == 0:
             self.log_output.append("<span style='color: #4CAF50;'>✓ Process completed successfully</span>")
-        else:
-            self.log_output.append(f"<span style='color: #f44336;'>✗ Process exited with code {exit_code}</span>")
+        elif exit_code == -15 or exit_code == 143:  # SIGTERM
+            self.log_output.append("<span style='color: #ff9800;'>⚠ Process was terminated</span>")
 
         # Re-enable run button, disable stop button
         self.run_btn.setEnabled(True)
@@ -504,6 +677,15 @@ class OrgDocsGUI(QMainWindow):
             if sys.platform == "win32" and 'bash_path' in settings and self.bash_path_edit:
                 self.bash_path_edit.setText(settings['bash_path'])
 
+            # Restore zoom level
+            if 'zoom_level' in settings:
+                self.zoom_level = settings['zoom_level']
+                self.apply_zoom()
+
+            self.log_output.append("<span style='color: #4CAF50;'>✓ Settings loaded</span>")
+
+        except Exception as e:
+            self.log_output.append(f"<span style='color: #ff9800;'>Warning: Could not load settings: {str(e)}</span>")
 
     def save_settings(self):
         """Save settings to JSON file"""
@@ -514,12 +696,34 @@ class OrgDocsGUI(QMainWindow):
                 'dry_run': self.dry_run_cb.isChecked(),
                 'interactive': self.interactive_cb.isChecked(),
                 'verbose': self.verbose_cb.isChecked(),
-                'splitter_sizes': self.splitter.sizes() if self.splitter else [420, 280]
+                'splitter_sizes': self.splitter.sizes() if self.splitter else [420, 280],
+                'zoom_level': self.zoom_level
             }
 
             # Save bash path on Windows
             if sys.platform == "win32" and self.bash_path_edit:
                 settings['bash_path'] = self.bash_path_edit.text()
+
+            with open(self.SETTINGS_FILE, 'w') as f:
+                json.dump(settings, f, indent=2)
+
+        except Exception as e:
+            print(f"Warning: Could not save settings: {str(e)}")
+
+    def closeEvent(self, event):
+        """Save settings when window closes"""
+        # Stop any running thread before closing
+        if self.runner_thread and self.runner_thread.isRunning():
+            self.runner_thread.stop()
+            # Wait up to 3 seconds for thread to finish
+            if not self.runner_thread.wait(3000):
+                # Force terminate if it doesn't stop
+                self.runner_thread.terminate()
+                self.runner_thread.wait()
+
+        self.save_settings()
+        event.accept()
+
 
 def main():
     """Main entry point"""
